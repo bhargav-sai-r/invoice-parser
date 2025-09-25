@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amazon Invoice Parser - v3 (Robust)</title>
+    <title>Amazon Invoice Parser - Smart Grid</title>
     <style>
-        /* CSS Styles remain the same */
+        /* CSS remains the same */
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 2rem; background-color: #f4f7f9; color: #333; display: flex; justify-content: center; }
         .container { width: 100%; max-width: 800px; background: #fff; padding: 2.5rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
         h1 { font-size: 1.8rem; color: #1a2533; border-bottom: 2px solid #eef; padding-bottom: 0.5rem; margin-top: 0; }
@@ -24,83 +24,134 @@
 <body>
     <div class="container">
         <h1>Amazon Advertising Invoice Processor</h1>
-        <p>Select one or more invoice PDF files. This advanced parser reconstructs the document layout to accurately extract summary and campaign data before sending it to Google Sheets.</p>
+        <p>This parser uses a smart grid system to understand the visual layout of the invoice, reading tables column by column to ensure accurate data extraction before sending to Google Sheets.</p>
         <input type="file" id="pdfFiles" accept="application/pdf" multiple>
         <button id="processButton" onclick="processInvoices()">Process Files</button>
         <div id="statusArea">Processing status will appear here...</div>
     </div>
 
     <script>
+        // --- CONFIGURATION ---
         const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzo2Rr4axxkzbvmo_oZ0uYMkL8k6DcwCpbILsCp33HhRZUviptUV0Ci30x1NyxD0-Y/exec'; // <-- PASTE YOUR URL HERE
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js';
 
-        // --- All other functions (processInvoices, getPdfTextItems, sendDataToGoogleSheet, logStatus, reconstructLines) remain exactly the same ---
-        // We are only changing the parseAmazonInvoice function.
+        // ==================================================================================
+        // NEW SMART PARSING ENGINE
+        // ==================================================================================
 
         function parseAmazonInvoice(items) {
-            logStatus('Reconstructing lines from PDF data...');
-            const lines = reconstructLines(items);
-            // The 'm' flag allows ^ and $ to match start/end of lines, not just start/end of string
-            const fullText = lines.join('\n'); 
+            const fullText = items.map(i => i.str).join(' ');
 
-            // =======================================================================
-            // CRITICAL DEBUGGING STEP: This will print the text to the browser console.
-            console.log("--- Full Reconstructed Text for Parsing ---");
-            console.log(fullText);
-            console.log("-----------------------------------------");
-            // =======================================================================
-
-            logStatus('Extracting summary data with robust regex...');
-            // --- MODIFIED REGEX: Made more flexible to handle spacing variations ---
+            logStatus('Extracting summary data...');
             const summary = {
-                // Allows for variable spaces between words and around the colon.
-                invoiceNumber: fullText.match(/Invoice\s*Number\s*:\s*(\S+)/im)?.[1] || 'Not Found',
-                invoiceDate: fullText.match(/Invoice\s*Date\s*:\s*(\S+)/im)?.[1] || 'Not Found',
-                // Looks for text between "Invoice Period:" and "Invoice Currency", spanning multiple lines if needed.
-                invoicePeriod: fullText.match(/Invoice\s*Period\s*:\s*(.*?)\s*Invoice\s*Currency/ims)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
-                invoiceCurrency: fullText.match(/Invoice\s*Currency\s*:\s*(\S+)/im)?.[1] || 'Not Found',
-                paymentMethod: fullText.match(/Payment\s*Method\s*:\s*(.*?)\s*Summary/ims)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
-                // Handles cases where the amount might be on the next line. The 's' flag lets '.' match newlines.
-                billedAmountDue: fullText.match(/Billed\s*Amount\s*Due\s*([\d.,]+\s+[A-Z]{3})/ims)?.[1] || 'Not Found'
+                invoiceNumber: fullText.match(/Invoice\s*Number\s*:\s*(\S+)/i)?.[1] || 'Not Found',
+                invoiceDate: fullText.match(/Invoice\s*Date\s*:\s*(\S+)/i)?.[1] || 'Not Found',
+                invoicePeriod: fullText.match(/Invoice\s*Period\s*:\s*(.*?)\s*Invoice\s*Currency/is)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
+                invoiceCurrency: fullText.match(/Invoice\s*Currency\s*:\s*(\S+)/i)?.[1] || 'Not Found',
+                paymentMethod: fullText.match(/Payment\s*Method\s*:\s*(.*?)\s*Summary/is)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
+                billedAmountDue: fullText.match(/Billed\s*Amount\s*Due\s*([\d.,]+\s+[A-Z]{3})/is)?.[1] || 'Not Found'
             };
 
-            logStatus('Extracting detailed campaign data from tables...');
-            const details = [];
-            let currentSection = 'Portfolio';
-            const tableHeaderRegex = /Campaign\s+Campaign type\s+Clicks\s+Average CPC\s+Amount/;
-            const feesHeaderString = 'Other Fees and Adjustments';
-            let inTable = false;
-            for (const line of lines) {
-                if (line.match(tableHeaderRegex)) { inTable = true; continue; }
-                if (line.includes(feesHeaderString)) { inTable = true; currentSection = 'Other Fees'; continue; }
-                if (line.includes('Portfolio total:') || line.includes('Campaign Charges total:')) { inTable = false; continue; }
-                if (inTable) {
-                    const rowRegex = /(SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY)\s+([\d,]+)\s+([\d.,]+\s+[A-Z]{3})\s+([\d.,]+\s+[A-Z]{3})$/;
-                    const match = line.match(rowRegex);
-                    if (match) {
-                        const campaignType = match[1];
-                        const campaignName = line.substring(0, match.index).trim();
-                        details.push({
-                            campaign: campaignName,
-                            campaignType: campaignType,
-                            clicks: match[2],
-                            averageCPC: match[3],
-                            amount: match[4],
-                            isPortfolio: currentSection === 'Portfolio' ? 'Yes' : 'No',
-                            isOtherFees: currentSection === 'Other Fees' ? 'Yes' : 'No'
-                        });
-                    }
-                }
+            logStatus('Identifying document sections...');
+            const portfolioHeaderAnchor = items.find(item => item.str.toLowerCase().includes('portfolio name') && item.str.toLowerCase().includes('sp'));
+            const feesHeaderAnchor = items.find(item => item.str === 'Other Fees and Adjustments');
+            const endOfTablesAnchor = items.find(item => item.str === 'Adjustments') || items.find(item => item.str === 'Campaign Charges total:');
+
+            let portfolioItems = [];
+            let feesItems = [];
+
+            if (portfolioHeaderAnchor && feesHeaderAnchor) {
+                portfolioItems = items.filter(item => item.transform[5] < portfolioHeaderAnchor.transform[5] && item.transform[5] > feesHeaderAnchor.transform[5]);
+                feesItems = items.filter(item => item.transform[5] < feesHeaderAnchor.transform[5] && item.transform[5] > endOfTablesAnchor.transform[5]);
+            } else {
+                logStatus('Could not find primary section anchors ("Portfolio name SP", "Other Fees"). Parsing may be incomplete.', 'error');
             }
 
+            logStatus('Parsing Portfolio table...');
+            const portfolioDetails = parseTable(portfolioItems, {
+                isPortfolio: 'Yes',
+                isOtherFees: 'No',
+            });
+
+            logStatus('Parsing Other Fees table...');
+            const feesDetails = parseTable(feesItems, {
+                isPortfolio: 'No',
+                isOtherFees: 'Yes',
+            });
+
+            const details = [...portfolioDetails, ...feesDetails];
             if (details.length === 0) {
-                 logStatus('Warning: No detailed campaign items were parsed. The document format might have changed.', 'error');
+                logStatus('Warning: No detailed campaign items were parsed.', 'error');
             }
+            
             return { summary, details };
         }
 
-        // --- PASTE ALL OTHER HELPER FUNCTIONS HERE (UNCHANGED) ---
-        // processInvoices, getPdfTextItems, sendDataToGoogleSheet, logStatus, reconstructLines
+        function parseTable(items, context) {
+            const HEADER_FIELDS = ['Campaign', 'Campaign type', 'Clicks', 'Average CPC', 'Amount (ex. Tax)'];
+            const headerItems = HEADER_FIELDS.map(field => items.find(item => item.str.includes(field))).filter(Boolean);
+
+            if (headerItems.length < HEADER_FIELDS.length) {
+                return []; // Cannot parse table without headers
+            }
+            
+            // Determine column boundaries from header positions
+            const columnBounds = {};
+            headerItems.sort((a,b) => a.transform[4] - b.transform[4]); // Sort by X coordinate
+            for(let i = 0; i < headerItems.length; i++) {
+                const header = headerItems[i].str;
+                const startX = headerItems[i].transform[4];
+                const endX = (i < headerItems.length - 1) ? headerItems[i+1].transform[4] - 5 : 1000; // Look ahead or go to end of page
+                
+                if (header.includes('Campaign')) columnBounds.campaign = { startX, endX, data: '' };
+                else if (header.includes('type')) columnBounds.campaignType = { startX, endX, data: '' };
+                else if (header.includes('Clicks')) columnBounds.clicks = { startX, endX, data: '' };
+                else if (header.includes('Average CPC')) columnBounds.averageCPC = { startX, endX, data: '' };
+                else if (header.includes('Amount')) columnBounds.amount = { startX, endX, data: '' };
+            }
+
+            const results = [];
+            let currentRowData = {};
+            const tableStartY = headerItems[0].transform[5]; // Y-coordinate of the header
+
+            // Filter for items that are below the header
+            const bodyItems = items.filter(item => item.transform[5] < tableStartY - 10); // 10 is tolerance
+
+            for (const item of bodyItems) {
+                const x = item.transform[4];
+                let belongsToColumn = null;
+
+                if (x >= columnBounds.campaign.startX && x < columnBounds.campaign.endX) belongsToColumn = 'campaign';
+                else if (x >= columnBounds.campaignType.startX && x < columnBounds.campaignType.endX) belongsToColumn = 'campaignType';
+                else if (x >= columnBounds.clicks.startX && x < columnBounds.clicks.endX) belongsToColumn = 'clicks';
+                else if (x >= columnBounds.averageCPC.startX && x < columnBounds.averageCPC.endX) belongsToColumn = 'averageCPC';
+                else if (x >= columnBounds.amount.startX && x < columnBounds.amount.endX) belongsToColumn = 'amount';
+
+                if (belongsToColumn) {
+                    if (!currentRowData[belongsToColumn]) {
+                        currentRowData[belongsToColumn] = '';
+                    }
+                    // Add a space if concatenating a multi-word field like campaign name
+                    if (currentRowData[belongsToColumn] !== '') currentRowData[belongsToColumn] += ' ';
+                    currentRowData[belongsToColumn] += item.str;
+                }
+
+                // The last column getting data is the trigger that the row is complete.
+                if (belongsToColumn === 'amount') {
+                    // Add context data
+                    currentRowData.isPortfolio = context.isPortfolio;
+                    currentRowData.isOtherFees = context.isOtherFees;
+                    results.push(currentRowData);
+                    currentRowData = {}; // Reset for the next row
+                }
+            }
+            return results;
+        }
+
+        // ==================================================================================
+        // UTILITY AND FETCHING FUNCTIONS (MOSTLY UNCHANGED)
+        // ==================================================================================
+
         async function processInvoices() {
             if (GAS_WEB_APP_URL.includes('YOUR_COPIED_WEB_APP_URL')) {
                 logStatus('ERROR: Please configure the Google Apps Script URL in the HTML file.', 'error');
@@ -143,7 +194,13 @@
                         for (let i = 1; i <= pdf.numPages; i++) {
                             const page = await pdf.getPage(i);
                             const textContent = await page.getTextContent();
-                            allItems = allItems.concat(textContent.items);
+                            // Sort items top-to-bottom, then left-to-right before returning
+                            const sortedItems = textContent.items.sort((a, b) => {
+                                if (a.transform[5] > b.transform[5]) return -1; // Higher Y is higher on page
+                                if (a.transform[5] < b.transform[5]) return 1;
+                                return a.transform[4] - b.transform[4]; // Same Y, sort by X
+                            });
+                            allItems = allItems.concat(sortedItems);
                         }
                         resolve(allItems);
                     } catch (error) { reject(new Error('Could not read PDF content.')); }
@@ -151,27 +208,6 @@
                 reader.onerror = () => reject(new Error('Failed to read file.'));
                 reader.readAsArrayBuffer(file);
             });
-        }
-
-        function reconstructLines(items) {
-            const lines = [];
-            if (!items.length) return lines;
-            let currentLine = [];
-            let lastY = items[0].transform[5];
-            for (const item of items) {
-                const currentY = item.transform[5];
-                if (Math.abs(currentY - lastY) < 5) {
-                    currentLine.push(item);
-                } else {
-                    if (currentLine.length > 0) {
-                        lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
-                    }
-                    currentLine = [item];
-                    lastY = currentY;
-                }
-            }
-            lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
-            return lines;
         }
 
         function sendDataToGoogleSheet(data) {
