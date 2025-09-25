@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amazon Invoice Parser - Advanced</title>
+    <title>Amazon Invoice Parser - v3 (Robust)</title>
     <style>
+        /* CSS Styles remain the same */
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 2rem; background-color: #f4f7f9; color: #333; display: flex; justify-content: center; }
         .container { width: 100%; max-width: 800px; background: #fff; padding: 2.5rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
         h1 { font-size: 1.8rem; color: #1a2533; border-bottom: 2px solid #eef; padding-bottom: 0.5rem; margin-top: 0; }
@@ -24,24 +25,83 @@
     <div class="container">
         <h1>Amazon Advertising Invoice Processor</h1>
         <p>Select one or more invoice PDF files. This advanced parser reconstructs the document layout to accurately extract summary and campaign data before sending it to Google Sheets.</p>
-        
         <input type="file" id="pdfFiles" accept="application/pdf" multiple>
-        
         <button id="processButton" onclick="processInvoices()">Process Files</button>
-        
         <div id="statusArea">Processing status will appear here...</div>
     </div>
 
     <script>
-        // --- CONFIGURATION ---
         const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzo2Rr4axxkzbvmo_oZ0uYMkL8k6DcwCpbILsCp33HhRZUviptUV0Ci30x1NyxD0-Y/exec'; // <-- PASTE YOUR URL HERE
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js';
 
-        const statusArea = document.getElementById('statusArea');
-        const processButton = document.getElementById('processButton');
+        // --- All other functions (processInvoices, getPdfTextItems, sendDataToGoogleSheet, logStatus, reconstructLines) remain exactly the same ---
+        // We are only changing the parseAmazonInvoice function.
 
+        function parseAmazonInvoice(items) {
+            logStatus('Reconstructing lines from PDF data...');
+            const lines = reconstructLines(items);
+            // The 'm' flag allows ^ and $ to match start/end of lines, not just start/end of string
+            const fullText = lines.join('\n'); 
+
+            // =======================================================================
+            // CRITICAL DEBUGGING STEP: This will print the text to the browser console.
+            console.log("--- Full Reconstructed Text for Parsing ---");
+            console.log(fullText);
+            console.log("-----------------------------------------");
+            // =======================================================================
+
+            logStatus('Extracting summary data with robust regex...');
+            // --- MODIFIED REGEX: Made more flexible to handle spacing variations ---
+            const summary = {
+                // Allows for variable spaces between words and around the colon.
+                invoiceNumber: fullText.match(/Invoice\s*Number\s*:\s*(\S+)/im)?.[1] || 'Not Found',
+                invoiceDate: fullText.match(/Invoice\s*Date\s*:\s*(\S+)/im)?.[1] || 'Not Found',
+                // Looks for text between "Invoice Period:" and "Invoice Currency", spanning multiple lines if needed.
+                invoicePeriod: fullText.match(/Invoice\s*Period\s*:\s*(.*?)\s*Invoice\s*Currency/ims)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
+                invoiceCurrency: fullText.match(/Invoice\s*Currency\s*:\s*(\S+)/im)?.[1] || 'Not Found',
+                paymentMethod: fullText.match(/Payment\s*Method\s*:\s*(.*?)\s*Summary/ims)?.[1]?.trim().replace(/\s+/g, ' ') || 'Not Found',
+                // Handles cases where the amount might be on the next line. The 's' flag lets '.' match newlines.
+                billedAmountDue: fullText.match(/Billed\s*Amount\s*Due\s*([\d.,]+\s+[A-Z]{3})/ims)?.[1] || 'Not Found'
+            };
+
+            logStatus('Extracting detailed campaign data from tables...');
+            const details = [];
+            let currentSection = 'Portfolio';
+            const tableHeaderRegex = /Campaign\s+Campaign type\s+Clicks\s+Average CPC\s+Amount/;
+            const feesHeaderString = 'Other Fees and Adjustments';
+            let inTable = false;
+            for (const line of lines) {
+                if (line.match(tableHeaderRegex)) { inTable = true; continue; }
+                if (line.includes(feesHeaderString)) { inTable = true; currentSection = 'Other Fees'; continue; }
+                if (line.includes('Portfolio total:') || line.includes('Campaign Charges total:')) { inTable = false; continue; }
+                if (inTable) {
+                    const rowRegex = /(SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY)\s+([\d,]+)\s+([\d.,]+\s+[A-Z]{3})\s+([\d.,]+\s+[A-Z]{3})$/;
+                    const match = line.match(rowRegex);
+                    if (match) {
+                        const campaignType = match[1];
+                        const campaignName = line.substring(0, match.index).trim();
+                        details.push({
+                            campaign: campaignName,
+                            campaignType: campaignType,
+                            clicks: match[2],
+                            averageCPC: match[3],
+                            amount: match[4],
+                            isPortfolio: currentSection === 'Portfolio' ? 'Yes' : 'No',
+                            isOtherFees: currentSection === 'Other Fees' ? 'Yes' : 'No'
+                        });
+                    }
+                }
+            }
+
+            if (details.length === 0) {
+                 logStatus('Warning: No detailed campaign items were parsed. The document format might have changed.', 'error');
+            }
+            return { summary, details };
+        }
+
+        // --- PASTE ALL OTHER HELPER FUNCTIONS HERE (UNCHANGED) ---
+        // processInvoices, getPdfTextItems, sendDataToGoogleSheet, logStatus, reconstructLines
         async function processInvoices() {
-            // ... (This function remains the same as before, no changes needed)
             if (GAS_WEB_APP_URL.includes('YOUR_COPIED_WEB_APP_URL')) {
                 logStatus('ERROR: Please configure the Google Apps Script URL in the HTML file.', 'error');
                 return;
@@ -73,7 +133,6 @@
         }
 
         function getPdfTextItems(file) {
-            // NEW: This function now returns the raw text items with coordinates, not a single string.
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = async () => {
@@ -93,115 +152,29 @@
                 reader.readAsArrayBuffer(file);
             });
         }
-        
-        // ==================================================================================
-        // THE NEW PARSING LOGIC STARTS HERE
-        // ==================================================================================
-        
-        function parseAmazonInvoice(items) {
-            logStatus('Reconstructing lines from PDF data...');
-            const lines = reconstructLines(items);
-            const fullText = lines.join('\n'); // Create a clean text version for summary extraction
-
-            logStatus('Extracting summary data...');
-            const summary = {
-                invoiceNumber: fullText.match(/Invoice Number:\s*(\S+)/)?.[1] || 'Not Found',
-                invoiceDate: fullText.match(/Invoice Date:\s*(\S+)/)?.[1] || 'Not Found',
-                invoicePeriod: fullText.match(/Invoice Period:\s*(.*?)\s*Invoice Currency/)?.[1]?.trim() || 'Not Found',
-                invoiceCurrency: fullText.match(/Invoice Currency:\s*(\S+)/)?.[1] || 'Not Found',
-                paymentMethod: fullText.match(/Payment Method:\s*(.*?)\s*Summary/)?.[1]?.trim() || 'Not Found',
-                billedAmountDue: fullText.match(/Billed Amount Due\s*([\d.]+\s+\S+)/)?.[1] || 'Not Found'
-            };
-
-            logStatus('Extracting detailed campaign data from tables...');
-            const details = [];
-            let currentSection = 'Portfolio'; // Assume we start in the Portfolio section
-
-            const tableHeaderRegex = /Campaign\s+Campaign type\s+Clicks\s+Average CPC\s+Amount/;
-            const feesHeaderString = 'Other Fees and Adjustments';
-
-            let inTable = false;
-            for (const line of lines) {
-                if (line.match(tableHeaderRegex)) {
-                    inTable = true;
-                    continue; // Skip the header line
-                }
-                if (line.includes(feesHeaderString)) {
-                    inTable = true; // Fees section also starts a table
-                    currentSection = 'Other Fees';
-                    continue;
-                }
-                if (line.includes('Portfolio total:')) {
-                    inTable = false; // Stop at the end of a table
-                    continue;
-                }
-
-                if (inTable) {
-                    // Regex to find a line with the table data structure at the end
-                    const rowRegex = /(SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY)\s+([\d,]+)\s+([\d.]+\s+GBP)\s+([\d.]+\s+GBP)$/;
-                    const match = line.match(rowRegex);
-                    
-                    if (match) {
-                        const campaignType = match[1];
-                        // Everything before the campaign type is the campaign name
-                        const campaignName = line.substring(0, match.index).trim();
-                        
-                        details.push({
-                            campaign: campaignName,
-                            campaignType: campaignType,
-                            clicks: match[2],
-                            averageCPC: match[3],
-                            amount: match[4],
-                            isPortfolio: currentSection === 'Portfolio' ? 'Yes' : 'No',
-                            isOtherFees: currentSection === 'Other Fees' ? 'Yes' : 'No'
-                        });
-                    }
-                }
-            }
-
-            if (details.length === 0) {
-                 logStatus('Warning: No detailed campaign items were parsed. The document format might have changed.', 'error');
-            }
-
-            return { summary, details };
-        }
 
         function reconstructLines(items) {
-            // NEW HELPER FUNCTION
-            // Groups text items into lines based on their vertical (Y) position.
             const lines = [];
             if (!items.length) return lines;
-
             let currentLine = [];
-            let lastY = items[0].transform[5]; // transform[5] is the Y coordinate
-
+            let lastY = items[0].transform[5];
             for (const item of items) {
                 const currentY = item.transform[5];
-                // If the Y position is roughly the same, it's part of the same line
-                if (Math.abs(currentY - lastY) < 5) { // 5 is a tolerance value
+                if (Math.abs(currentY - lastY) < 5) {
                     currentLine.push(item);
                 } else {
-                    // New line, so process the previous one and start a new one
                     if (currentLine.length > 0) {
-                        // Sort items on the line by their horizontal (X) position and join them
                         lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
                     }
                     currentLine = [item];
                     lastY = currentY;
                 }
             }
-            // Add the last line
             lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
-            
             return lines;
         }
 
-        // ==================================================================================
-        // END OF NEW PARSING LOGIC
-        // ==================================================================================
-
         function sendDataToGoogleSheet(data) {
-            // ... (This function remains the same as before, no changes needed)
             logStatus(`Sending data for ${data.summary.invoiceNumber} to Google Sheets...`);
             return fetch(GAS_WEB_APP_URL, {
                 method: 'POST',
@@ -217,7 +190,6 @@
         }
 
         function logStatus(message, type = 'info') {
-            // ... (This function remains the same as before, no changes needed)
             const line = document.createElement('div');
             line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
             if (type === 'success') { line.className = 'status-success'; } 
