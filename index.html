@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amazon Invoice Parser</title>
+    <title>Amazon Invoice Parser - Advanced</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 2rem; background-color: #f4f7f9; color: #333; display: flex; justify-content: center; }
         .container { width: 100%; max-width: 800px; background: #fff; padding: 2.5rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
@@ -18,13 +18,12 @@
         .status-success { color: green; }
         .status-error { color: red; }
     </style>
-    <!-- JAVASCRIPT LIBRARIES -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
 </head>
 <body>
     <div class="container">
         <h1>Amazon Advertising Invoice Processor</h1>
-        <p>Select one or more invoice PDF files. The tool will extract the summary and detailed campaign data and send it to your configured Google Sheet.</p>
+        <p>Select one or more invoice PDF files. This advanced parser reconstructs the document layout to accurately extract summary and campaign data before sending it to Google Sheets.</p>
         
         <input type="file" id="pdfFiles" accept="application/pdf" multiple>
         
@@ -42,162 +41,189 @@
         const processButton = document.getElementById('processButton');
 
         async function processInvoices() {
-            if (GAS_WEB_APP_URL.includes('YOUR_COPIED_WEB_APP_URL')) {
+            // ... (This function remains the same as before, no changes needed)
+            if (GAS_WEB_APP_URL.includes('https://script.google.com/macros/s/AKfycbzo2Rr4axxkzbvmo_oZ0uYMkL8k6DcwCpbILsCp33HhRZUviptUV0Ci30x1NyxD0-Y/exec')) {
                 logStatus('ERROR: Please configure the Google Apps Script URL in the HTML file.', 'error');
                 return;
             }
-
             const fileInput = document.getElementById('pdfFiles');
             if (!fileInput.files.length) {
                 logStatus('Please select one or more PDF files.', 'error');
                 return;
             }
-
             processButton.disabled = true;
             processButton.textContent = 'Processing...';
-            statusArea.innerHTML = ''; // Clear previous logs
-
+            statusArea.innerHTML = '';
             for (const file of fileInput.files) {
                 logStatus(`--- Processing ${file.name} ---`);
                 try {
-                    const fullText = await getPdfText(file);
-                    const invoiceData = parseAmazonInvoice(fullText);
+                    const pdfItems = await getPdfTextItems(file);
+                    const invoiceData = parseAmazonInvoice(pdfItems);
+                    if (!invoiceData.summary.invoiceNumber || invoiceData.summary.invoiceNumber === 'Not Found') {
+                        throw new Error('Could not parse Invoice Number. Check if the file is a valid Amazon invoice.');
+                    }
                     await sendDataToGoogleSheet(invoiceData);
                     logStatus(`SUCCESS: Successfully processed and sent data for ${invoiceData.summary.invoiceNumber}.`, 'success');
                 } catch (error) {
                     logStatus(`FAILED: ${error.message} for file ${file.name}.`, 'error');
                 }
             }
-            
             processButton.disabled = false;
             processButton.textContent = 'Process Files';
         }
 
-        function getPdfText(file) {
+        function getPdfTextItems(file) {
+            // NEW: This function now returns the raw text items with coordinates, not a single string.
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = async () => {
                     try {
                         const typedarray = new Uint8Array(reader.result);
                         const pdf = await pdfjsLib.getDocument(typedarray).promise;
-                        let fullText = '';
+                        let allItems = [];
                         for (let i = 1; i <= pdf.numPages; i++) {
                             const page = await pdf.getPage(i);
                             const textContent = await page.getTextContent();
-                            fullText += textContent.items.map(item => item.str).join(' ');
+                            allItems = allItems.concat(textContent.items);
                         }
-                        resolve(fullText);
-                    } catch (error) {
-                        reject(new Error('Could not read PDF content.'));
-                    }
+                        resolve(allItems);
+                    } catch (error) { reject(new Error('Could not read PDF content.')); }
                 };
                 reader.onerror = () => reject(new Error('Failed to read file.'));
                 reader.readAsArrayBuffer(file);
             });
         }
+        
+        // ==================================================================================
+        // THE NEW PARSING LOGIC STARTS HERE
+        // ==================================================================================
+        
+        function parseAmazonInvoice(items) {
+            logStatus('Reconstructing lines from PDF data...');
+            const lines = reconstructLines(items);
+            const fullText = lines.join('\n'); // Create a clean text version for summary extraction
 
-        function parseAmazonInvoice(text) {
-            logStatus('Parsing invoice text...');
-
-            // --- 1. Extract Summary Data using Regular Expressions ---
+            logStatus('Extracting summary data...');
             const summary = {
-                invoiceNumber: text.match(/Invoice Number: (\S+)/)?.[1] || 'Not Found',
-                invoiceDate: text.match(/Invoice Date: (\S+)/)?.[1] || 'Not Found',
-                invoicePeriod: text.match(/Invoice Period: (.*?)\s+Invoice Currency/)?.[1] || 'Not Found',
-                invoiceCurrency: text.match(/Invoice Currency: (\S+)/)?.[1] || 'Not Found',
-                paymentMethod: text.match(/Payment Method: (.*?)\s+Summary/)?.[1] || 'Not Found',
-                billedAmountDue: text.match(/Billed Amount Due ([\d.]+\s+\S+)/)?.[1] || 'Not Found'
+                invoiceNumber: fullText.match(/Invoice Number:\s*(\S+)/)?.[1] || 'Not Found',
+                invoiceDate: fullText.match(/Invoice Date:\s*(\S+)/)?.[1] || 'Not Found',
+                invoicePeriod: fullText.match(/Invoice Period:\s*(.*?)\s*Invoice Currency/)?.[1]?.trim() || 'Not Found',
+                invoiceCurrency: fullText.match(/Invoice Currency:\s*(\S+)/)?.[1] || 'Not Found',
+                paymentMethod: fullText.match(/Payment Method:\s*(.*?)\s*Summary/)?.[1]?.trim() || 'Not Found',
+                billedAmountDue: fullText.match(/Billed Amount Due\s*([\d.]+\s+\S+)/)?.[1] || 'Not Found'
             };
 
-            // --- 2. Extract Detailed Campaign Data ---
+            logStatus('Extracting detailed campaign data from tables...');
             const details = [];
-            // Regex to find rows starting with a campaign name and ending with a GBP amount.
-            // This is complex and might need adjustment for different invoice variations.
-            const campaignRegex = /(SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY)\s+([\d,]+)\s+([\d.]+\s+GBP)\s+([\d.]+\s+GBP)/g;
-            
-            // A simplified approach: Find the table headers and slice the text.
-            const portfolioHeader = 'Campaign Campaign type Clicks Average CPC Amount (ex. Tax)';
-            const feesHeader = 'Other Fees and Adjustments';
+            let currentSection = 'Portfolio'; // Assume we start in the Portfolio section
 
-            let portfolioSection = text.substring(text.indexOf(portfolioHeader) + portfolioHeader.length, text.indexOf(feesHeader));
-            let feesSection = text.substring(text.indexOf(feesHeader) + feesHeader.length);
+            const tableHeaderRegex = /Campaign\s+Campaign type\s+Clicks\s+Average CPC\s+Amount/;
+            const feesHeaderString = 'Other Fees and Adjustments';
 
-            // This is a simplified regex to capture an entire line of campaign data.
-            // It looks for SPONSORED PRODUCTS followed by numbers and currency. This is the hardest part.
-            // For this specific format, a different strategy is needed. We will split by "SPONSORED PRODUCTS".
-            
-            const lines = text.split(/SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY/);
-            
-            let isPortfolioContext = false;
+            let inTable = false;
+            for (const line of lines) {
+                if (line.match(tableHeaderRegex)) {
+                    inTable = true;
+                    continue; // Skip the header line
+                }
+                if (line.includes(feesHeaderString)) {
+                    inTable = true; // Fees section also starts a table
+                    currentSection = 'Other Fees';
+                    continue;
+                }
+                if (line.includes('Portfolio total:')) {
+                    inTable = false; // Stop at the end of a table
+                    continue;
+                }
 
-            // Simplified loop: this logic is highly dependent on the OCR text format and is fragile.
-            // A truly robust solution would require more advanced parsing.
-            if (text.includes("Portfolio name SP")) {
-                isPortfolioContext = true;
+                if (inTable) {
+                    // Regex to find a line with the table data structure at the end
+                    const rowRegex = /(SPONSORED PRODUCTS|SPONSORED BRANDS|SPONSORED DISPLAY)\s+([\d,]+)\s+([\d.]+\s+GBP)\s+([\d.]+\s+GBP)$/;
+                    const match = line.match(rowRegex);
+                    
+                    if (match) {
+                        const campaignType = match[1];
+                        // Everything before the campaign type is the campaign name
+                        const campaignName = line.substring(0, match.index).trim();
+                        
+                        details.push({
+                            campaign: campaignName,
+                            campaignType: campaignType,
+                            clicks: match[2],
+                            averageCPC: match[3],
+                            amount: match[4],
+                            isPortfolio: currentSection === 'Portfolio' ? 'Yes' : 'No',
+                            isOtherFees: currentSection === 'Other Fees' ? 'Yes' : 'No'
+                        });
+                    }
+                }
             }
-            // For now, let's assume all campaigns found are portfolio campaigns for the POC
-            // This is a known simplification. A more robust parser would check section headers.
-            
-            // This regex will attempt to capture the campaign name and the numeric values in one go.
-            // It looks for a campaign name (often multiline), the campaign type, then the three numeric/currency fields.
-            const lineItemRegex = /((?:SP[A-Z_]{1,10}\s?)+.*?)\s+(SPONSORED PRODUCTS)\s+([\d,]+)\s+([\d.]+\s+GBP)\s+([\d.]+\s+GBP)/g;
-            
-            // This is a placeholder for a more advanced parsing logic, as regex on raw text can be unreliable.
-            // For now, we will add a placeholder item.
-            // The OCR text provided does not lend itself to a simple line-by-line regex.
-            // A production version would need a more sophisticated parsing engine.
-            
-            logStatus('Detailed parsing is complex. Using placeholder logic for now.');
-            // This part remains a significant challenge with raw text parsing.
-            // For the purpose of this demo, we'll create one dummy entry.
-            // A more robust solution would involve looking for patterns like "SP..." followed by "SPONSORED PRODUCTS".
-             details.push({
-                campaign: 'SKW_White Table Runner...', // Dummy data
-                campaignType: 'SPONSORED PRODUCTS',
-                clicks: '20',
-                averageCPC: '0.64 GBP',
-                amount: '12.77 GBP',
-                isPortfolio: 'Yes',
-                isOtherFees: 'No'
-            });
-
 
             if (details.length === 0) {
-                 logStatus('Warning: No detailed campaign items were parsed. Check parsing logic.', 'error');
+                 logStatus('Warning: No detailed campaign items were parsed. The document format might have changed.', 'error');
             }
 
             return { summary, details };
         }
-        
+
+        function reconstructLines(items) {
+            // NEW HELPER FUNCTION
+            // Groups text items into lines based on their vertical (Y) position.
+            const lines = [];
+            if (!items.length) return lines;
+
+            let currentLine = [];
+            let lastY = items[0].transform[5]; // transform[5] is the Y coordinate
+
+            for (const item of items) {
+                const currentY = item.transform[5];
+                // If the Y position is roughly the same, it's part of the same line
+                if (Math.abs(currentY - lastY) < 5) { // 5 is a tolerance value
+                    currentLine.push(item);
+                } else {
+                    // New line, so process the previous one and start a new one
+                    if (currentLine.length > 0) {
+                        // Sort items on the line by their horizontal (X) position and join them
+                        lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
+                    }
+                    currentLine = [item];
+                    lastY = currentY;
+                }
+            }
+            // Add the last line
+            lines.push(currentLine.sort((a, b) => a.transform[4] - b.transform[4]).map(i => i.str).join(' '));
+            
+            return lines;
+        }
+
+        // ==================================================================================
+        // END OF NEW PARSING LOGIC
+        // ==================================================================================
+
         function sendDataToGoogleSheet(data) {
+            // ... (This function remains the same as before, no changes needed)
             logStatus(`Sending data for ${data.summary.invoiceNumber} to Google Sheets...`);
             return fetch(GAS_WEB_APP_URL, {
                 method: 'POST',
                 body: JSON.stringify(data),
-                headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Use text/plain to avoid CORS issues
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
             })
             .then(response => response.json())
             .then(result => {
-                if (result.status !== 'success') {
-                    throw new Error(result.message);
-                }
+                if (result.status !== 'success') { throw new Error(result.message); }
                 return result;
             })
-            .catch(error => {
-                throw new Error(`Failed to send data to Google Sheet: ${error.message}`);
-            });
+            .catch(error => { throw new Error(`Failed to send data to Google Sheet: ${error.message}`); });
         }
 
         function logStatus(message, type = 'info') {
+            // ... (This function remains the same as before, no changes needed)
             const line = document.createElement('div');
             line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-            if (type === 'success') {
-                line.className = 'status-success';
-            } else if (type === 'error') {
-                line.className = 'status-error';
-            }
+            if (type === 'success') { line.className = 'status-success'; } 
+            else if (type === 'error') { line.className = 'status-error'; }
             statusArea.appendChild(line);
-            statusArea.scrollTop = statusArea.scrollHeight; // Auto-scroll to bottom
+            statusArea.scrollTop = statusArea.scrollHeight;
         }
     </script>
 </body>
